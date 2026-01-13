@@ -59,10 +59,12 @@ export default function DocumentUpload() {
     })
 
     try {
-      // For PDFs and binary files, convert to base64
+      // For PDFs, DOCX, and other binary files, convert to base64
       // For text files, read as text
       const isBinary = file.type === 'application/pdf' || 
                        file.name.toLowerCase().endsWith('.pdf') ||
+                       file.name.toLowerCase().endsWith('.docx') ||
+                       file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
                        file.type.startsWith('image/')
       
       let content: string

@@ -1,0 +1,36 @@
+# fly.toml for Fly.io deployment
+app = "rag-knowledge-base-backend"
+primary_region = "iad"
+
+[build]
+  builder = "paketobuildpacks/builder:base"
+
+[env]
+  PORT = "8080"
+  CHROMA_PATH = "/data/chroma"
+  LLM_PROVIDER = "groq"
+  EMBEDDING_PROVIDER = "local"
+  LLM_MODEL = "llama-3.1-8b-instant"
+
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
+
+  [[services.http_checks]]
+    interval = "10s"
+    timeout = "2s"
+    grace_period = "5s"
+    method = "GET"
+    path = "/api/v1/health"
+
+[[mounts]]
+  source = "chroma_data"
+  destination = "/data"

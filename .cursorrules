@@ -1,0 +1,118 @@
+# Architecture Spec - RAG + Agent Knowledge Base System
+
+## Project Overview
+
+This is a Knowledge Base system using RAG (Retrieval-Augmented Generation) with autonomous agents built in Python following **Spec-Driven Development (SDD)**.
+
+## Core Principles
+
+1. **Spec-Driven Development**: Type Specs and Test Specs are written BEFORE implementation
+2. **Type Safety**: 100% type hints, mypy strict mode, Pydantic for contracts
+3. **Test-Driven**: Tests are specifications, written before implementation
+4. **Incremental Development**: Small, testable increments (1-2 files at a time)
+5. **Agent-Friendly Code**: Self-documenting, modular, context-bounded
+
+## Architecture
+
+### Backend Structure
+```
+backend/
+  src/
+    agents/       # LangGraph agents (state, nodes, graph)
+    rag/          # RAG system (chunking, embeddings, retriever)
+    models/       # SQLAlchemy models
+    schemas/      # Pydantic schemas (Type Specs)
+    api/          # FastAPI routes
+    services/     # Business logic
+    config.py     # Configuration (pydantic-settings)
+    main.py       # FastAPI app
+  tests/
+    unit/         # Unit tests (Test Specs)
+    integration/  # Integration tests
+    fixtures/     # Test fixtures
+```
+
+### Development Flow (Spec-Driven)
+1. **Type Specs**: Define Pydantic schemas first
+2. **Test Specs**: Write pytest tests as specifications
+3. **Implementation**: Implement code that satisfies specs
+4. **Validation**: Run mypy + pytest to verify specs are met
+
+## Code Standards
+
+### Type Hints
+- ALL functions must have complete type hints
+- Use `typing` module, avoid `Any` when possible
+- Pydantic models for data contracts
+- Return types must be explicit
+
+### Testing
+- Write tests BEFORE implementation (Test Specs)
+- Tests are specifications of behavior
+- Use pytest with fixtures
+- Minimum 80% coverage
+- Test files mirror source structure
+
+### Code Style
+- Use Ruff for formatting (replaces Black, isort, Flake8)
+- Max line length: 100
+- Docstrings: Google style with examples
+- Self-documenting code preferred over comments
+
+### File Organization
+- One responsibility per file
+- Max file size: ~500 lines
+- Clear interfaces between modules
+- Schemas in `schemas/`, not inline
+
+## Dependencies
+
+### Core
+- Python 3.11+
+- Poetry for dependency management
+- FastAPI for API
+- LangGraph + LangChain for agents/RAG
+- Pydantic v2 for validation
+- SQLAlchemy 2.0 for ORM
+
+### Testing
+- pytest with pytest-cov
+- mypy for type checking
+- Ruff for linting/formatting
+
+## AI Agent Guidelines
+
+When implementing:
+1. Read Type Specs first (in `schemas/`)
+2. Read Test Specs to understand expected behavior
+3. Implement code that satisfies both
+4. Run validation (mypy + pytest) before committing
+5. Keep context bounded to 1-2 files at a time
+
+## Examples
+
+### Type Spec First
+```python
+# schemas/rag.py (Type Spec)
+class DocumentChunk(BaseModel):
+    content: str
+    metadata: dict
+    embedding: List[float] | None
+```
+
+### Test Spec Second
+```python
+# tests/unit/rag/test_retriever.py (Test Spec)
+def test_retrieve_returns_chunks():
+    result = retrieve_documents("query")
+    assert isinstance(result, RetrievalResult)
+    assert len(result.chunks) > 0
+```
+
+### Implementation Third
+```python
+# rag/retriever.py (Implementation)
+def retrieve_documents(query: str) -> RetrievalResult:
+    # Implementation based on Type Specs and Test Specs
+    ...
+```

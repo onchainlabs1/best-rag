@@ -1,0 +1,39 @@
+# Core dependencies
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.6.0
+pydantic-settings>=2.1.0
+python-multipart>=0.0.6
+python-dotenv>=1.0.1
+
+# Database (optional - pode não usar inicialmente)
+# sqlalchemy>=2.0.25
+# alembic>=1.13.1
+# psycopg2-binary>=2.9.9
+
+# AI/ML
+langgraph>=0.0.40
+langchain>=0.1.9
+langchain-core>=0.1.0
+langchain-openai>=0.0.5
+langchain-anthropic>=0.1.0
+langchain-groq>=0.0.1
+langchain-community>=0.0.20
+langchain-text-splitters>=0.0.1
+chromadb>=0.4.22
+sentence-transformers>=2.3.1
+openai>=1.12.0
+
+# Document Parsing
+docling>=1.0.0
+
+# Logging
+structlog>=24.1.0
+
+# Dev dependencies (opcional)
+# pytest>=8.0.0
+# pytest-cov>=4.1.0
+# pytest-asyncio>=0.23.3
+# mypy>=1.8.0
+# ruff>=0.3.0
+# httpx>=0.26.0

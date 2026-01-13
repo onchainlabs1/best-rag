@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: rag-knowledge-base-backend
+    env: python
+    region: oregon
+    buildCommand: cd backend && pip install -r requirements.txt
+    startCommand: cd backend && uvicorn src.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: CHROMA_PATH
+        value: /tmp/chroma
+      - key: LLM_PROVIDER
+        value: groq
+      - key: EMBEDDING_PROVIDER
+        value: local
+      - key: GROQ_API_KEY
+        sync: false  # Set this in Render dashboard
+      - key: LLM_MODEL
+        value: llama-3.1-8b-instant

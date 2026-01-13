@@ -199,15 +199,39 @@ class DocumentParser:
             logger.info("parsing_docx", filename=filename)
             
             # Decode base64 if needed
+            # DOCX files start with PK (ZIP signature) when decoded
+            # Check if content is base64 encoded
+            def looks_like_base64(s: str) -> bool:
+                """Check if string looks like base64 encoded data."""
+                if len(s) < 100:
+                    return False
+                base64_chars = set('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=')
+                non_base64 = sum(1 for c in s[:1000] if c not in base64_chars and not c.isspace())
+                return non_base64 < len(s[:1000]) * 0.1
+            
             try:
-                if isinstance(content, str) and not content.startswith('PK'):  # DOCX starts with PK (ZIP signature)
-                    docx_bytes = base64.b64decode(content)
+                if isinstance(content, str) and looks_like_base64(content):
+                    # Try to decode base64
+                    try:
+                        docx_bytes = base64.b64decode(content, validate=True)
+                        # Verify it's actually a DOCX (starts with PK)
+                        if not docx_bytes.startswith(b'PK'):
+                            logger.warning("decoded_not_docx", message="Decoded content doesn't look like DOCX")
+                            # Fallback to simple parsing
+                            return self._parse_simple(content, filename, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+                    except Exception as e:
+                        logger.warning("docx_base64_decode_failed", error=str(e))
+                        # Fallback to simple parsing
+                        return self._parse_simple(content, filename, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+                elif isinstance(content, str):
+                    # Already decoded or plain text - try to encode as bytes
+                    docx_bytes = content.encode('latin-1')
                 else:
-                    docx_bytes = content.encode('latin-1') if isinstance(content, str) else content
+                    docx_bytes = content
             except Exception as e:
-                logger.warning("docx_decode_failed", error=str(e))
-                # Try as raw bytes
-                docx_bytes = content.encode('latin-1') if isinstance(content, str) else content
+                logger.error("docx_decode_error", error=str(e), error_type=type(e).__name__)
+                # Fallback to simple parsing
+                return self._parse_simple(content, filename, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
             
             # Parse DOCX
             doc = Document(io.BytesIO(docx_bytes))

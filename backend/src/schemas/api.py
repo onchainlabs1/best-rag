@@ -20,10 +20,21 @@ class BatchDocumentUpload(BaseModel):
     documents: List[DocumentUpload] = Field(..., description="List of documents to upload")
 
 
+class DocumentInfo(BaseModel):
+    """Spec: Information about a document."""
+
+    id: str = Field(..., description="Document identifier")
+    filename: str = Field(..., description="File name")
+    content_type: str = Field(..., description="MIME type")
+    uploaded_at: datetime = Field(..., description="Upload timestamp")
+    chunk_count: int = Field(default=0, description="Number of chunks")
+    metadata: dict = Field(default_factory=dict, description="Document metadata")
+
+
 class DocumentList(BaseModel):
     """Spec: Response with list of documents."""
 
-    documents: List["DocumentInfo"] = Field(..., description="List of documents")
+    documents: List[DocumentInfo] = Field(..., description="List of documents")
     total: int = Field(..., description="Total number of documents")
 
 
@@ -35,17 +46,6 @@ class BatchDocumentUploadResponse(BaseModel):
     total: int = Field(..., description="Total documents processed")
     success_count: int = Field(..., description="Number of successful uploads")
     error_count: int = Field(..., description="Number of failed uploads")
-
-
-class DocumentInfo(BaseModel):
-    """Spec: Information about a document."""
-
-    id: str = Field(..., description="Document identifier")
-    filename: str = Field(..., description="File name")
-    content_type: str = Field(..., description="MIME type")
-    uploaded_at: datetime = Field(..., description="Upload timestamp")
-    chunk_count: int = Field(default=0, description="Number of chunks")
-    metadata: dict = Field(default_factory=dict, description="Document metadata")
 
 
 class QueryRequest(BaseModel):
@@ -87,3 +87,4 @@ class HealthResponse(BaseModel):
 # Update forward references
 DocumentList.model_rebuild()
 QueryResponse.model_rebuild()
+BatchDocumentUploadResponse.model_rebuild()

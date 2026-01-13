@@ -59,8 +59,26 @@ class DocumentService:
         
         if not parsed_content or len(parsed_content.strip()) == 0:
             logger.warning("no_content_extracted", doc_id=doc_id, filename=upload.filename)
-            # If no content extracted, use original content as fallback
-            parsed_content = upload.content
+            # If no content extracted, try to decode base64 if it looks like base64
+            # Never store base64 directly in ChromaDB - it must be decoded text
+            import base64
+            try:
+                # Check if content looks like base64
+                if len(upload.content) > 100 and all(c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r\t ' for c in upload.content[:500]):
+                    decoded = base64.b64decode(upload.content, validate=True)
+                    # Try to decode as UTF-8 text
+                    parsed_content = decoded.decode('utf-8', errors='ignore')
+                    if not parsed_content or len(parsed_content.strip()) == 0:
+                        logger.error("decoded_content_empty", doc_id=doc_id)
+                        raise ValueError("Decoded content is empty")
+                else:
+                    # Not base64, use as-is
+                    parsed_content = upload.content
+            except Exception as e:
+                logger.error("fallback_decode_failed", doc_id=doc_id, error=str(e))
+                # Last resort: use original but log warning
+                parsed_content = upload.content
+                logger.warning("using_raw_content_fallback", doc_id=doc_id, warning="Content may be base64 encoded")
         
         logger.info("document_parsed", doc_id=doc_id, extracted_length=len(parsed_content))
 

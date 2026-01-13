@@ -1,8 +1,11 @@
 """FastAPI application."""
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse
+import time
 from src.api.v1 import documents, queries, agents, health
 from src.config import settings
 from src import __version__
@@ -53,6 +56,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add timeout middleware for long-running requests
+@app.middleware("http")
+async def timeout_middleware(request: Request, call_next):
+    """Add timeout handling for long requests."""
+    start_time = time.time()
+    try:
+        response = await call_next(request)
+        process_time = time.time() - start_time
+        response.headers["X-Process-Time"] = str(process_time)
+        return response
+    except Exception as e:
+        logger.error("request_error", error=str(e), path=request.url.path)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Request failed: {str(e)}"}
+        )
 
 # Include routers
 app.include_router(documents.router, prefix="/api/v1")

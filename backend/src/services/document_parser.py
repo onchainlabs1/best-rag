@@ -43,7 +43,7 @@ class DocumentParser:
         content_type: str,
     ) -> str:
         """
-        Parse document content using Docling for PDFs, fallback for others.
+        Parse document content using Docling for PDFs, python-docx for DOCX, fallback for others.
 
         Args:
             content: Document content (can be base64 encoded or plain text)
@@ -59,9 +59,19 @@ class DocumentParser:
             content_type == 'application/pdf' or
             'pdf' in content_type.lower()
         )
+        
+        # Check if it's a DOCX file
+        is_docx = (
+            filename.lower().endswith('.docx') or
+            content_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' or
+            'docx' in content_type.lower() or
+            'word' in content_type.lower()
+        )
 
         if is_pdf and self.docling_available:
             return self._parse_with_docling(content, filename)
+        elif is_docx:
+            return self._parse_docx(content, filename)
         else:
             # Fallback to simple text extraction
             return self._parse_simple(content, filename, content_type)
@@ -170,6 +180,71 @@ class DocumentParser:
         except Exception as e:
             logger.error("docling_unavailable", error=str(e))
             return self._parse_simple(content, filename, 'application/pdf')
+
+    def _parse_docx(self, content: str, filename: str) -> str:
+        """
+        Parse DOCX file using python-docx.
+
+        Args:
+            content: Document content (base64 encoded)
+            filename: Original filename
+
+        Returns:
+            Extracted text content
+        """
+        try:
+            from docx import Document
+            import io
+            
+            logger.info("parsing_docx", filename=filename)
+            
+            # Decode base64 if needed
+            try:
+                if isinstance(content, str) and not content.startswith('PK'):  # DOCX starts with PK (ZIP signature)
+                    docx_bytes = base64.b64decode(content)
+                else:
+                    docx_bytes = content.encode('latin-1') if isinstance(content, str) else content
+            except Exception as e:
+                logger.warning("docx_decode_failed", error=str(e))
+                # Try as raw bytes
+                docx_bytes = content.encode('latin-1') if isinstance(content, str) else content
+            
+            # Parse DOCX
+            doc = Document(io.BytesIO(docx_bytes))
+            
+            # Extract text from all paragraphs
+            text_parts = []
+            for paragraph in doc.paragraphs:
+                if paragraph.text.strip():
+                    text_parts.append(paragraph.text)
+            
+            # Extract text from tables
+            for table in doc.tables:
+                for row in table.rows:
+                    row_text = []
+                    for cell in row.cells:
+                        if cell.text.strip():
+                            row_text.append(cell.text.strip())
+                    if row_text:
+                        text_parts.append(' | '.join(row_text))
+            
+            text = '\n\n'.join(text_parts)
+            
+            if not text or len(text.strip()) == 0:
+                logger.warning("docx_no_text_extracted", filename=filename)
+                return ""
+            
+            logger.info("docx_parse_success", filename=filename, text_length=len(text))
+            return text
+            
+        except ImportError:
+            logger.warning("python_docx_not_available", message="python-docx not installed. Install with: pip install python-docx")
+            # Fallback to simple extraction
+            return self._parse_simple(content, filename, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+        except Exception as e:
+            logger.error("docx_parse_error", error=str(e), error_type=type(e).__name__)
+            # Fallback to simple extraction
+            return self._parse_simple(content, filename, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
 
     def _parse_simple(self, content: str, filename: str, content_type: str) -> str:
         """

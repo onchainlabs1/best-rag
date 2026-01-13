@@ -77,44 +77,60 @@ export default function DocumentUpload() {
         content = await file.text()
       }
       
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/api/v1/documents`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          filename: file.name,
-          content,
-          content_type: file.type || 'text/plain',
-          metadata: {},
-        }),
-      })
+      // Add timeout (5 minutes per file)
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000) // 5 minutes
+      
+      try {
+        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/api/v1/documents`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            filename: file.name,
+            content,
+            content_type: file.type || 'text/plain',
+            metadata: {},
+          }),
+          signal: controller.signal,
+        })
+        
+        clearTimeout(timeoutId)
 
       if (!response.ok) {
         const error = await response.json().catch(() => ({ detail: 'Failed to upload document' }))
         throw new Error(error.detail || 'Failed to upload document')
       }
 
-      const data = await response.json()
-      
-      // Update progress to success
-      setUploadProgress(prev => {
-        const newProgress = [...prev]
-        newProgress[index] = { 
-          filename: file.name, 
-          status: 'success',
-          docId: data.id
-        }
-        return newProgress
-      })
+        const data = await response.json()
+        
+        // Update progress to success
+        setUploadProgress(prev => {
+          const newProgress = [...prev]
+          newProgress[index] = { 
+            filename: file.name, 
+            status: 'success',
+            docId: data.id
+          }
+          return newProgress
+        })
+      } finally {
+        clearTimeout(timeoutId)
+      }
     } catch (error) {
+      clearTimeout(timeoutId)
       // Update progress to error
+      const errorMessage = error instanceof Error 
+        ? (error.name === 'AbortError' ? 'Upload timeout (5 minutes exceeded)' : error.message)
+        : 'Unknown error'
+      
       setUploadProgress(prev => {
         const newProgress = [...prev]
         newProgress[index] = { 
           filename: file.name, 
           status: 'error',
-          error: error instanceof Error ? error.message : 'Unknown error'
+          error: errorMessage
         }
         return newProgress
       })

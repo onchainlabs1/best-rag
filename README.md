@@ -236,6 +236,7 @@ Built with:
 ## 📚 Documentation
 
 - `ARCHITECTURE.md` - System architecture
+- `BEST-PRACTICES.md` - **Best practices showcase** (what's implemented and why)
 - `QUICKSTART.md` - Quick start guide
 - `API.md` - API documentation
 - `DEPLOYMENT.md` - Free deployment guide (Vercel, Render, Fly.io)

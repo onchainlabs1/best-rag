@@ -193,28 +193,32 @@ poetry run pytest --cov=src --cov-report=html
 - API keys stored in `.env` (not committed)
 - CORS configurable (default: open for development)
 - Debug endpoint available (disable in production)
-- Rate limiting: Not implemented (documented limitation)
+- Rate limiting: Implemented (configurable via environment variables)
 
 See `SECURITY.md` for security best practices.
 
 ## 📦 Features
 
 ### Implemented ✅
-- Document upload (PDF, TXT, MD)
+- Document upload (PDF, TXT, MD, DOCX)
 - Vector embeddings (OpenAI/local)
 - Semantic search (ChromaDB)
+- **Hybrid search** (BM25 + Vector) - configurable
+- **Re-ranking** with Cross-Encoder - configurable
+- **Query expansion** using LLM - configurable
+- **Caching** for embeddings and queries - configurable
 - LangGraph agents with multi-step reasoning
 - Streaming responses (SSE)
 - Type-safe APIs (Pydantic)
 - Structured logging
+- **Rate limiting** - configurable
+- **PostgreSQL support** - alternative to SQLite
+- **Checkpointing** - optional state persistence
+- **OpenTelemetry tracing** - for observability
 
 ### Planned (Not Yet Implemented) 🚧
-- Hybrid search (BM25 + vector)
-- Re-ranking
-- Query expansion
-- PostgreSQL metadata persistence
-- Checkpointing (state persistence)
 - Multi-modal support
+- Advanced metadata filtering
 
 ## 🤝 Contributing
 

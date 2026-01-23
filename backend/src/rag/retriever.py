@@ -1,12 +1,18 @@
 """RAG retriever with hybrid search and re-ranking."""
 
-from typing import List
+from typing import Literal
+
 import chromadb
 import structlog
 from chromadb.config import Settings as ChromaSettings
-from src.schemas.rag import DocumentChunk, RetrievalResult
+
 from src.config import settings
+from src.observability.tracing import get_tracer
+from src.rag.cache import QueryCache
 from src.rag.embeddings import EmbeddingService
+from src.rag.query_expansion import QueryExpander
+from src.rag.reranker import Reranker
+from src.schemas.rag import DocumentChunk, RetrievalResult
 
 logger = structlog.get_logger()
 
@@ -41,7 +47,28 @@ class RAGRetriever:
             metadata={"hnsw:space": "cosine"},
         )
 
-    def add_documents(self, chunks: List[DocumentChunk]) -> None:
+        # BM25 index (lazy initialization)
+        self._bm25_index: dict[str, str] | None = None
+        self._bm25_model = None
+
+        # Re-ranker (lazy initialization)
+        self.reranker: Reranker | None = None
+
+        # Query cache (lazy initialization)
+        self.query_cache: QueryCache | None = None
+        if settings.cache_enabled:
+            self.query_cache = QueryCache(ttl=settings.cache_queries_ttl)
+
+        # Query expander (lazy initialization)
+        self.query_expander: QueryExpander | None = None
+        if settings.query_expansion_enabled:
+            self.query_expander = QueryExpander(use_llm=settings.query_expansion_use_llm)
+
+        # BM25 index (lazy initialization)
+        self._bm25_index: dict[str, list[str]] | None = None
+        self._bm25_model = None
+
+    def add_documents(self, chunks: list[DocumentChunk]) -> None:
         """
         Add document chunks to the vector database.
 
@@ -52,8 +79,8 @@ class RAGRetriever:
             return
 
         # Generate embeddings for chunks that don't have them
-        texts_to_embed: List[str] = []
-        indices_to_embed: List[int] = []
+        texts_to_embed: list[str] = []
+        indices_to_embed: list[int] = []
 
         for idx, chunk in enumerate(chunks):
             if chunk.embedding is None:
@@ -62,32 +89,40 @@ class RAGRetriever:
 
         if texts_to_embed:
             total = len(texts_to_embed)
-            logger.info("generating_embeddings", total_chunks=total, provider=self.embedding_service.provider)
-            
+            logger.info(
+                "generating_embeddings",
+                total_chunks=total,
+                provider=self.embedding_service.provider,
+            )
+
             # Use generate_embeddings to respect embedding_provider setting
             from src.schemas.rag import EmbeddingRequest
-            
+
             embedding_request = EmbeddingRequest(texts=texts_to_embed)
             embedding_response = self.embedding_service.generate_embeddings(embedding_request)
             embeddings = embedding_response.embeddings
-            
-            logger.info("embeddings_generated", count=len(embeddings), provider=self.embedding_service.provider)
-            
+
+            logger.info(
+                "embeddings_generated",
+                count=len(embeddings),
+                provider=self.embedding_service.provider,
+            )
+
             for embed_idx, chunk_idx in enumerate(indices_to_embed):
                 chunks[chunk_idx].embedding = embeddings[embed_idx]
 
         # Prepare data for ChromaDB and add in batches to avoid size limits
         # ChromaDB has a max batch size limit, so we process in smaller chunks
-        CHROMA_BATCH_SIZE = 100  # Safe batch size for ChromaDB
-        
-        for batch_start in range(0, len(chunks), CHROMA_BATCH_SIZE):
-            batch_end = min(batch_start + CHROMA_BATCH_SIZE, len(chunks))
+        batch_size = settings.chroma_batch_size
+
+        for batch_start in range(0, len(chunks), batch_size):
+            batch_end = min(batch_start + batch_size, len(chunks))
             batch_chunks = chunks[batch_start:batch_end]
-            
-            ids: List[str] = []
-            embeddings_list: List[List[float]] = []
-            documents: List[str] = []
-            metadatas: List[dict] = []
+
+            ids: list[str] = []
+            embeddings_list: list[list[float]] = []
+            documents: list[str] = []
+            metadatas: list[dict] = []
 
             for chunk in batch_chunks:
                 if chunk.embedding is None:
@@ -100,17 +135,382 @@ class RAGRetriever:
                 metadatas.append(chunk.metadata)
 
             if ids:
-                logger.info("adding_chunks_to_chromadb", batch_size=len(ids), total_chunks=len(chunks))
+                logger.info(
+                    "adding_chunks_to_chromadb", batch_size=len(ids), total_chunks=len(chunks)
+                )
                 self.collection.add(
                     ids=ids,
                     embeddings=embeddings_list,
                     documents=documents,
                     metadatas=metadatas,
                 )
-        
+
         logger.info("all_chunks_added_to_chromadb", total_chunks=len(chunks))
 
+        # Invalidate BM25 index when new documents are added
+        self._bm25_index = None
+        self._bm25_model = None
+
+    def _init_bm25(self) -> None:
+        """Initialize BM25 index from collection documents."""
+        if self._bm25_index is not None and self._bm25_model is not None:
+            return
+
+        try:
+            from rank_bm25 import BM25Okapi
+        except ImportError:
+            logger.warning("rank-bm25 not installed. BM25 search will not work.")
+            self._bm25_index = {}
+            self._bm25_model = None
+            return
+
+        # Get all documents from collection
+        try:
+            all_results = self.collection.get(include=["documents", "metadatas", "ids"])
+            if not all_results or not all_results.get("documents"):
+                self._bm25_index = {}
+                self._bm25_model = None
+                return
+
+            documents = all_results["documents"]
+            ids = all_results.get("ids", [])
+
+            # Tokenize documents for BM25
+            tokenized_docs = [doc.lower().split() for doc in documents if doc]
+
+            if not tokenized_docs:
+                self._bm25_index = {}
+                self._bm25_model = None
+                return
+
+            # Create BM25 model
+            self._bm25_model = BM25Okapi(tokenized_docs)
+            self._bm25_index = {str(ids[i]): documents[i] for i in range(len(documents)) if i < len(documents)}
+
+            logger.info("bm25_index_initialized", doc_count=len(tokenized_docs))
+        except Exception as e:
+            logger.error("bm25_init_failed", error=str(e))
+            self._bm25_index = {}
+            self._bm25_model = None
+
+    def _bm25_search(
+        self,
+        query: str,
+        top_k: int = 5,
+        filter_metadata: dict | None = None,
+    ) -> RetrievalResult:
+        """
+        Perform BM25 search.
+
+        Args:
+            query: Search query
+            top_k: Number of results to return
+            filter_metadata: Optional metadata filters (not fully supported for BM25)
+
+        Returns:
+            Retrieval result with chunks and scores
+        """
+        self._init_bm25()
+
+        if self._bm25_model is None or self._bm25_index is None:
+            # Fallback to empty result if BM25 not available
+            return RetrievalResult(
+                chunks=[],
+                scores=[],
+                query=query,
+                total_results=0,
+            )
+
+        # Tokenize query
+        tokenized_query = query.lower().split()
+
+        # Get BM25 scores
+        scores = self._bm25_model.get_scores(tokenized_query)
+
+        # Get all documents and IDs
+        try:
+            all_results = self.collection.get(include=["documents", "metadatas", "ids"])
+            if not all_results or not all_results.get("ids"):
+                return RetrievalResult(
+                    chunks=[],
+                    scores=[],
+                    query=query,
+                    total_results=0,
+                )
+
+            documents = all_results["documents"]
+            ids = all_results.get("ids", [])
+            metadatas = all_results.get("metadatas", [])
+
+            # Create list of (score, index) tuples and sort
+            scored_docs = [(scores[i], i) for i in range(len(scores))]
+            scored_docs.sort(reverse=True, key=lambda x: x[0])
+
+            # Get top-k results
+            chunks: list[DocumentChunk] = []
+            result_scores: list[float] = []
+
+            for score, idx in scored_docs[:top_k]:
+                if score <= 0:
+                    continue
+
+                doc_id = str(ids[idx])
+                content = documents[idx] if idx < len(documents) else ""
+                metadata = metadatas[idx] if idx < len(metadatas) else {}
+
+                # Apply metadata filter if provided
+                if filter_metadata:
+                    match = all(
+                        metadata.get(key) == value for key, value in filter_metadata.items()
+                    )
+                    if not match:
+                        continue
+
+                # Normalize BM25 score to 0-1 range (BM25 scores can be negative or very large)
+                # Use sigmoid-like normalization
+                normalized_score = min(1.0, max(0.0, score / 10.0 + 0.5))
+
+                chunk = DocumentChunk(
+                    content=content,
+                    metadata=metadata,
+                    chunk_id=doc_id,
+                    source=metadata.get("source"),
+                    position=metadata.get("position"),
+                )
+                chunks.append(chunk)
+                result_scores.append(normalized_score)
+
+            return RetrievalResult(
+                chunks=chunks,
+                scores=result_scores,
+                query=query,
+                total_results=len(chunks),
+            )
+        except Exception as e:
+            logger.error("bm25_search_error", error=str(e))
+            return RetrievalResult(
+                chunks=[],
+                scores=[],
+                query=query,
+                total_results=0,
+            )
+
+    def _combine_results(
+        self,
+        vector_result: RetrievalResult,
+        bm25_result: RetrievalResult,
+        alpha: float = 0.5,
+        top_k: int = 5,
+    ) -> RetrievalResult:
+        """
+        Combine vector and BM25 search results using reciprocal rank fusion.
+
+        Args:
+            vector_result: Results from vector search
+            bm25_result: Results from BM25 search
+            alpha: Weight for vector search (0.0 = BM25 only, 1.0 = vector only)
+            top_k: Number of final results to return
+
+        Returns:
+            Combined retrieval result
+        """
+        # Create a map of chunk_id -> (chunk, combined_score)
+        combined: dict[str, tuple[DocumentChunk, float]] = {}
+
+        # Add vector results with weight alpha
+        for idx, chunk in enumerate(vector_result.chunks):
+            score = vector_result.scores[idx] if idx < len(vector_result.scores) else 0.0
+            combined_score = score * alpha
+            chunk_id = chunk.chunk_id or f"{chunk.source}_{chunk.position}"
+
+            if chunk_id not in combined or combined[chunk_id][1] < combined_score:
+                combined[chunk_id] = (chunk, combined_score)
+
+        # Add BM25 results with weight (1 - alpha)
+        for idx, chunk in enumerate(bm25_result.chunks):
+            score = bm25_result.scores[idx] if idx < len(bm25_result.scores) else 0.0
+            combined_score = score * (1.0 - alpha)
+            chunk_id = chunk.chunk_id or f"{chunk.source}_{chunk.position}"
+
+            if chunk_id in combined:
+                # Combine scores
+                existing_score = combined[chunk_id][1]
+                combined[chunk_id] = (chunk, existing_score + combined_score)
+            else:
+                combined[chunk_id] = (chunk, combined_score)
+
+        # Sort by combined score and take top-k
+        sorted_results = sorted(combined.values(), key=lambda x: x[1], reverse=True)[:top_k]
+
+        chunks = [chunk for chunk, _ in sorted_results]
+        scores = [score for _, score in sorted_results]
+
+        return RetrievalResult(
+            chunks=chunks,
+            scores=scores,
+            query=vector_result.query,
+            total_results=len(chunks),
+        )
+
     def retrieve(
+        self,
+        query: str,
+        top_k: int = 5,
+        score_threshold: float = 0.7,
+        search_type: Literal["vector", "bm25", "hybrid"] | None = None,
+        alpha: float | None = None,
+        filter_metadata: dict | None = None,
+    ) -> RetrievalResult:
+        """
+        Retrieve relevant documents for a query.
+
+        Args:
+            query: Search query
+            top_k: Number of results to return
+            score_threshold: Minimum similarity score
+            search_type: Type of search ("vector", "bm25", "hybrid")
+            alpha: Weight for hybrid search (0.0 = BM25 only, 1.0 = vector only, default: 0.5)
+            filter_metadata: Optional metadata filters
+
+        Returns:
+            Retrieval result with chunks and scores
+        """
+        # Use default search type from settings if not provided
+        if search_type is None:
+            search_type = settings.search_type
+
+        # Use default alpha from settings if not provided
+        if alpha is None:
+            alpha = settings.hybrid_search_alpha
+
+        # Start tracing span if available
+        tracer = get_tracer(__name__)
+        span = None
+        if tracer:
+            span = tracer.start_as_current_span("rag.retrieve")
+            span.set_attribute("query", query)
+            span.set_attribute("search_type", search_type or "vector")
+            span.set_attribute("top_k", top_k)
+
+        try:
+            # Expand query if enabled
+            original_query = query
+            if settings.query_expansion_enabled and self.query_expander:
+                query = self.query_expander.expand(query)
+                if query != original_query:
+                    logger.info("query_expanded", original=original_query, expanded=query)
+                    if span:
+                        span.set_attribute("query_expanded", True)
+
+            # Check query cache first (use original query for cache key to avoid cache misses)
+            if self.query_cache:
+                cached_result = self.query_cache.get(
+                    original_query, top_k, score_threshold, search_type, alpha
+                )
+                if cached_result is not None:
+                    logger.info("query_cache_hit", query=original_query[:50])
+                    if span:
+                        span.set_attribute("cache_hit", True)
+                        span.end()
+                    return cached_result
+
+            # Initialize re-ranker if needed (lazy initialization)
+            if settings.rerank_enabled and self.reranker is None:
+                self.reranker = Reranker(model=settings.rerank_model)
+
+            # Log collection info for debugging
+            try:
+                collection_count = self.collection.count()
+                logger.info(
+                    "retrieving_from_collection",
+                    collection_name=self.collection_name,
+                    total_docs=collection_count,
+                    query=query,
+                    search_type=search_type,
+                )
+            except Exception as e:
+                logger.warning("failed_to_count_collection", error=str(e))
+
+            # Perform search based on type
+            if search_type == "bm25":
+                result = self._bm25_search(query, top_k=top_k, filter_metadata=filter_metadata)
+            elif search_type == "hybrid":
+                # Perform both searches
+                vector_result = self._vector_search(query, top_k=top_k * 2, score_threshold=0.0, filter_metadata=filter_metadata)
+                bm25_result = self._bm25_search(query, top_k=top_k * 2, filter_metadata=filter_metadata)
+
+                # Combine results
+                combined = self._combine_results(vector_result, bm25_result, alpha=alpha, top_k=top_k)
+
+                # Apply score threshold to combined results
+                filtered_chunks = []
+                filtered_scores = []
+                for idx, chunk in enumerate(combined.chunks):
+                    score = combined.scores[idx] if idx < len(combined.scores) else 0.0
+                    if score_threshold <= 0.0 or score >= score_threshold:
+                        filtered_chunks.append(chunk)
+                        filtered_scores.append(score)
+
+                result = RetrievalResult(
+                    chunks=filtered_chunks[:top_k],
+                    scores=filtered_scores[:top_k],
+                    query=query,
+                    total_results=len(filtered_chunks),
+                )
+            else:
+                # Default: vector search
+                result = self._vector_search(query, top_k=top_k, score_threshold=score_threshold, filter_metadata=filter_metadata)
+
+            # Apply re-ranking if enabled
+            if settings.rerank_enabled and self.reranker and self.reranker.is_available() and result.chunks:
+                logger.info("applying_reranking", chunk_count=len(result.chunks))
+                documents = [chunk.content for chunk in result.chunks]
+                reranked = self.reranker.rerank(query, documents, top_k=settings.rerank_top_k)
+
+                # Map reranked results back to chunks
+                reranked_chunks: list[DocumentChunk] = []
+                reranked_scores: list[float] = []
+
+                # Create a map of content -> chunk for quick lookup
+                content_to_chunk = {chunk.content: chunk for chunk in result.chunks}
+
+                for doc_text, rerank_score in reranked:
+                    if doc_text in content_to_chunk:
+                        reranked_chunks.append(content_to_chunk[doc_text])
+                        reranked_scores.append(float(rerank_score))
+
+                # Update result with reranked chunks
+                result = RetrievalResult(
+                    chunks=reranked_chunks,
+                    scores=reranked_scores,
+                    query=query,
+                    total_results=len(reranked_chunks),
+                )
+                logger.info("reranking_completed", reranked_count=len(reranked_chunks))
+
+            # Cache result if enabled (use original query for cache key)
+            if self.query_cache:
+                self.query_cache.set(original_query, top_k, score_threshold, result, search_type, alpha)
+
+            # End tracing span
+            if span:
+                span.set_attribute("results_count", len(result.chunks))
+                span.end()
+
+            return result
+        except Exception as e:
+            # End tracing span with error
+            if span:
+                try:
+                    from opentelemetry import trace as otel_trace
+
+                    span.set_status(otel_trace.Status(otel_trace.StatusCode.ERROR, str(e)))
+                except ImportError:
+                    pass
+                span.end()
+            raise
+
+    def _vector_search(
         self,
         query: str,
         top_k: int = 5,
@@ -118,7 +518,7 @@ class RAGRetriever:
         filter_metadata: dict | None = None,
     ) -> RetrievalResult:
         """
-        Retrieve relevant documents for a query.
+        Perform vector search (original retrieve logic).
 
         Args:
             query: Search query
@@ -129,13 +529,6 @@ class RAGRetriever:
         Returns:
             Retrieval result with chunks and scores
         """
-        # Log collection info for debugging
-        try:
-            collection_count = self.collection.count()
-            logger.info("retrieving_from_collection", collection_name=self.collection_name, total_docs=collection_count, query=query)
-        except Exception as e:
-            logger.warning("failed_to_count_collection", error=str(e))
-
         # Generate query embedding
         query_embedding = self.embedding_service.embed_text(query)
         logger.debug("query_embedding_generated", embedding_dim=len(query_embedding))
@@ -147,25 +540,32 @@ class RAGRetriever:
             n_results=top_k,
             where=where,
         )
-        
+
         # Log detailed query results for debugging
         result_ids_count = 0
         if results.get("ids") and len(results["ids"]) > 0 and results["ids"][0]:
             result_ids_count = len(results["ids"][0])
-        
-        logger.info("chromadb_query_results", 
-                   found_ids=result_ids_count,
-                   requested_top_k=top_k,
-                   has_ids=bool(results.get("ids")),
-                   has_documents=bool(results.get("documents")),
-                   has_distances=bool(results.get("distances")))
+
+        logger.info(
+            "chromadb_query_results",
+            found_ids=result_ids_count,
+            requested_top_k=top_k,
+            has_ids=bool(results.get("ids")),
+            has_documents=bool(results.get("documents")),
+            has_distances=bool(results.get("distances")),
+        )
 
         # Process results
-        chunks: List[DocumentChunk] = []
-        scores: List[float] = []
+        chunks: list[DocumentChunk] = []
+        scores: list[float] = []
 
         # More robust check for results
-        if results.get("ids") and len(results["ids"]) > 0 and results["ids"][0] and len(results["ids"][0]) > 0:
+        if (
+            results.get("ids")
+            and len(results["ids"]) > 0
+            and results["ids"][0]
+            and len(results["ids"][0]) > 0
+        ):
             for idx, doc_id in enumerate(results["ids"][0]):
                 # ChromaDB returns cosine distance (0 = identical, 1 = orthogonal)
                 # Convert to similarity score (higher = more similar)
@@ -176,22 +576,29 @@ class RAGRetriever:
                 similarity = 1.0 - distance  # Cosine distance to similarity
 
                 # Log similarity scores for debugging
-                logger.info("retrieval_score", doc_id=str(doc_id), similarity=similarity, threshold=score_threshold, idx=idx)
+                logger.info(
+                    "retrieval_score",
+                    doc_id=str(doc_id),
+                    similarity=similarity,
+                    threshold=score_threshold,
+                    idx=idx,
+                )
 
-                # Sempre incluir resultados se threshold for 0.0
-                # Se threshold > 0, incluir se similarity >= threshold OU se for o primeiro resultado (para garantir pelo menos algo)
+                # Include results based on threshold
+                # If threshold is 0.0, include all results
+                # Otherwise, only include results that meet the threshold
                 should_include = False
                 if score_threshold <= 0.0:
                     should_include = True
                 elif similarity >= score_threshold:
                     should_include = True
-                elif idx == 0:
-                    # Incluir o primeiro resultado mesmo com score baixo para garantir que temos algo
-                    logger.info("including_first_result_despite_low_score", similarity=similarity, threshold=score_threshold)
-                    should_include = True
-                
+
                 if not should_include:
-                    logger.debug("skipping_result_below_threshold", similarity=similarity, threshold=score_threshold)
+                    logger.debug(
+                        "skipping_result_below_threshold",
+                        similarity=similarity,
+                        threshold=score_threshold,
+                    )
                     continue
 
                 # Safely extract content and metadata
@@ -199,7 +606,7 @@ class RAGRetriever:
                 if results.get("documents") and len(results["documents"]) > 0:
                     if len(results["documents"][0]) > idx:
                         content = results["documents"][0][idx] or ""
-                
+
                 metadata = {}
                 if results.get("metadatas") and len(results["metadatas"]) > 0:
                     if len(results["metadatas"][0]) > idx:
@@ -222,11 +629,13 @@ class RAGRetriever:
                 chunks.append(chunk)
                 scores.append(similarity)
 
-        logger.info("retrieval_final_result", 
-                   chunks_returned=len(chunks),
-                   scores_count=len(scores),
-                   first_score=scores[0] if scores else None)
-        
+        logger.info(
+            "retrieval_final_result",
+            chunks_returned=len(chunks),
+            scores_count=len(scores),
+            first_score=scores[0] if scores else None,
+        )
+
         return RetrievalResult(
             chunks=chunks,
             scores=scores,

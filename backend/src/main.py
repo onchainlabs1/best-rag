@@ -1,14 +1,21 @@
 """FastAPI application."""
 
+import time
+from collections.abc import Awaitable, Callable
+
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
-import time
-from src.api.v1 import documents, queries, agents, health
-from src.config import settings
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+from starlette.responses import Response
+
 from src import __version__
+from src.api.v1 import agents, documents, health, queries
+from src.config import settings
+from src.observability.tracing import setup_tracing
 
 # Configure structured logging
 structlog.configure(
@@ -31,6 +38,9 @@ structlog.configure(
 
 logger = structlog.get_logger()
 
+# Initialize rate limiter
+limiter = Limiter(key_func=get_remote_address)
+
 # Create FastAPI app
 app = FastAPI(
     title="RAG + Agent Knowledge Base",
@@ -39,6 +49,10 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+# Add rate limiter to app state
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS middleware - configurable via environment
 cors_origins_str = getattr(settings, "cors_origins", "*")
@@ -57,9 +71,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # Add timeout middleware for long-running requests
 @app.middleware("http")
-async def timeout_middleware(request: Request, call_next):
+async def timeout_middleware(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
     """Add timeout handling for long requests."""
     start_time = time.time()
     try:
@@ -69,10 +86,8 @@ async def timeout_middleware(request: Request, call_next):
         return response
     except Exception as e:
         logger.error("request_error", error=str(e), path=request.url.path)
-        return JSONResponse(
-            status_code=500,
-            content={"detail": f"Request failed: {str(e)}"}
-        )
+        return JSONResponse(status_code=500, content={"detail": f"Request failed: {str(e)}"})
+
 
 # Include routers
 app.include_router(documents.router, prefix="/api/v1")
@@ -80,11 +95,29 @@ app.include_router(queries.router, prefix="/api/v1")
 app.include_router(agents.router, prefix="/api/v1")
 app.include_router(health.router, prefix="/api/v1")
 
+# Set rate limiter in router modules after app is created
+documents.limiter = limiter
+queries.limiter = limiter
+agents.limiter = limiter
+
 
 @app.on_event("startup")
 async def startup_event() -> None:
     """Startup event handler."""
     logger.info("application_starting", version=__version__, debug=settings.debug)
+
+    # Setup OpenTelemetry tracing
+    setup_tracing()
+
+    # Instrument FastAPI if tracing is enabled
+    if settings.debug:
+        try:
+            from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor  # noqa: F401
+
+            FastAPIInstrumentor.instrument_app(app)
+            logger.info("fastapi_instrumented_for_tracing")
+        except ImportError:
+            pass  # OpenTelemetry not available
 
 
 @app.on_event("shutdown")

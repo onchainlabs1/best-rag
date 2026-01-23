@@ -1,20 +1,28 @@
 """Knowledge agent using LangGraph."""
 
-from typing import Callable
-from langgraph.graph import StateGraph, END
+
+import structlog
 from langchain_openai import ChatOpenAI
-from src.agents.state import AgentState
+from langgraph.graph import END, StateGraph
+
 from src.agents.nodes import (
-    retrieve_node,
-    generate_node,
-    validate_node,
-    refine_node,
     finalize_node,
+    generate_node,
+    refine_node,
+    retrieve_node,
+    validate_node,
 )
+from src.agents.state import AgentState
+from src.config import settings
+from src.observability.tracing import get_tracer
 from src.rag.retriever import RAGRetriever
 from src.schemas.agents import AgentConfig
-from src.config import settings
-import structlog
+
+# Import trace for status codes
+try:
+    from opentelemetry import trace
+except ImportError:
+    trace = None
 
 logger = structlog.get_logger()
 
@@ -46,31 +54,31 @@ class KnowledgeAgent:
     def _init_llm(self):
         """Initialize LLM based on provider setting."""
         provider = settings.llm_provider
-        
+
         if provider == "local":
             # Para modo local, usar um LLM mock ou deixar opcional
             # Por enquanto, usar OpenAI mesmo (pode ser configurado depois)
             logger.warning("LLM_PROVIDER=local not fully supported yet. Using OpenAI.")
             provider = "openai"
-        
+
         if provider == "groq":
             try:
                 from langchain_groq import ChatGroq
-            except ImportError:
+            except ImportError as err:
                 raise ImportError(
                     "langchain-groq is not installed. Install with: pip install langchain-groq"
-                )
-            
+                ) from err
+
             api_key = settings.groq_api_key or ""
             if not api_key:
                 raise ValueError("Groq API key not configured. Set GROQ_API_KEY in the .env file")
-            
+
             logger.info("using_groq_llm", model=settings.llm_model)
             return ChatGroq(
                 groq_api_key=api_key,
                 model_name=settings.llm_model,
-                temperature=0.3,  # Lower temperature for more focused, factual responses
-                max_tokens=1000,  # Reasonable limit for responses
+                temperature=settings.llm_temperature,
+                max_tokens=settings.llm_max_tokens,
             )
         elif provider == "openai":
             api_key = settings.openai_api_key or ""
@@ -79,27 +87,29 @@ class KnowledgeAgent:
             return ChatOpenAI(
                 api_key=api_key,
                 model=settings.llm_model,
-                temperature=0.3,  # Lower temperature for more focused, factual responses
-                max_tokens=1000,  # Reasonable limit for responses
+                temperature=settings.llm_temperature,
+                max_tokens=settings.llm_max_tokens,
             )
         elif provider == "anthropic":
             try:
                 from langchain_anthropic import ChatAnthropic
-            except ImportError:
+            except ImportError as err:
                 raise ImportError(
                     "langchain-anthropic is not installed. Install with: pip install langchain-anthropic"
-                )
-            
+                ) from err
+
             api_key = settings.anthropic_api_key or ""
             if not api_key:
-                raise ValueError("Anthropic API key not configured. Set ANTHROPIC_API_KEY in the .env file")
-            
+                raise ValueError(
+                    "Anthropic API key not configured. Set ANTHROPIC_API_KEY in the .env file"
+                )
+
             logger.info("using_anthropic_llm", model=settings.llm_model)
             return ChatAnthropic(
                 anthropic_api_key=api_key,
                 model=settings.llm_model,
-                temperature=0.3,
-                max_tokens=1000,
+                temperature=settings.llm_temperature,
+                max_tokens=settings.llm_max_tokens,
             )
         else:
             raise ValueError(f"Unsupported LLM provider: {provider}")
@@ -110,15 +120,18 @@ class KnowledgeAgent:
         workflow = StateGraph(AgentState)
 
         # Add nodes
-        workflow.add_node(
-            "retrieve",
-            lambda state: retrieve_node(
-                state, 
-                self.retriever, 
+        # Use closure to capture config values
+        def retrieve_wrapper(state: AgentState) -> AgentState:
+            return retrieve_node(
+                state,
+                self.retriever,
                 self.config.top_k,
                 self.config.score_threshold,
-            ),
-        )
+                self.config.search_type,
+                self.config.alpha,
+            )
+
+        workflow.add_node("retrieve", retrieve_wrapper)
         workflow.add_node(
             "generate",
             lambda state: generate_node(state, self.llm, self.config.validation_threshold),
@@ -127,16 +140,18 @@ class KnowledgeAgent:
             "validate",
             lambda state: validate_node(state, self.llm, self.config.validation_threshold),
         )
-        workflow.add_node(
-            "refine",
-            lambda state: refine_node(
-                state, 
-                self.retriever, 
-                self.llm, 
+        def refine_wrapper(state: AgentState) -> AgentState:
+            return refine_node(
+                state,
+                self.retriever,
+                self.llm,
                 self.config.top_k,
                 self.config.score_threshold,
-            ),
-        )
+                self.config.search_type,
+                self.config.alpha,
+            )
+
+        workflow.add_node("refine", refine_wrapper)
         workflow.add_node("finalize", finalize_node)
 
         # Add edges
@@ -167,7 +182,21 @@ class KnowledgeAgent:
         workflow.add_edge("refine", "validate")  # Loop back to validate
         workflow.add_edge("finalize", END)
 
-        return workflow.compile()
+        # Compile graph with optional checkpointing
+        if settings.checkpointing_enabled:
+            try:
+                from langgraph.checkpoint.sqlite import SqliteSaver
+
+                checkpointer = SqliteSaver.from_conn_string(settings.checkpoint_path)
+                return workflow.compile(checkpointer=checkpointer)
+            except ImportError:
+                logger.warning(
+                    "checkpointing_not_available",
+                    message="LangGraph checkpointing not available. Install langgraph with checkpointing support.",
+                )
+                return workflow.compile()
+        else:
+            return workflow.compile()
 
     def query(
         self,
@@ -186,24 +215,48 @@ class KnowledgeAgent:
         """
         logger.info("agent_query", query=query)
 
-        # Initial state
-        initial_state: AgentState = {
-            "query": query,
-            "retrieved_docs": [],
-            "context": "",
-            "response": "",
-            "validation_score": 0.0,
-            "iteration_count": 0,
-            "citations": [],
-            "metadata": {},
-        }
+        # Start tracing span if available
+        tracer = get_tracer(__name__)
+        span = None
+        if tracer:
+            span = tracer.start_as_current_span("agent.query")
+            span.set_attribute("query", query)
+            span.set_attribute("stream", stream)
 
-        # Run graph - separar streaming de non-streaming para evitar generator
-        if stream:
-            return self._query_stream(initial_state)
-        else:
-            return self._query_invoke(initial_state)
-    
+        try:
+            # Initial state
+            initial_state: AgentState = {
+                "query": query,
+                "retrieved_docs": [],
+                "context": "",
+                "response": "",
+                "validation_score": 0.0,
+                "iteration_count": 0,
+                "citations": [],
+                "metadata": {},
+            }
+
+            # Run graph - separar streaming de non-streaming para evitar generator
+            if stream:
+                result = self._query_stream(initial_state)
+            else:
+                result = self._query_invoke(initial_state)
+
+            # End tracing span
+            if span:
+                span.set_attribute("stream", stream)
+                span.end()
+
+            return result
+        except Exception as e:
+            # End tracing span with error
+            if span:
+                if trace:
+                    span.record_exception(e)
+                    span.set_status(trace.Status(trace.StatusCode.ERROR, str(e)))
+                span.end()
+            raise
+
     def _query_stream(self, initial_state: AgentState):
         """Stream query processing."""
         final_state = None
@@ -212,26 +265,26 @@ class KnowledgeAgent:
             yield state
         if final_state:
             yield final_state
-    
+
     def _query_invoke(self, initial_state: AgentState) -> dict:
         """Invoke query processing (non-streaming)."""
         try:
             final_state = self.graph.invoke(initial_state)
-            
+
             # LangGraph may return a dictionary or an object
             # Ensure we always work with a dictionary
             if not isinstance(final_state, dict):
                 # If it's an object, try to convert
-                if hasattr(final_state, '__dict__'):
+                if hasattr(final_state, "__dict__"):
                     final_state = final_state.__dict__
-                elif hasattr(final_state, 'keys'):
+                elif hasattr(final_state, "keys"):
                     # It's a dict-like object
                     final_state = dict(final_state)
                 else:
                     logger.error("unexpected_final_state_type", state_type=type(final_state))
                     # Return initial state if we can't convert
                     final_state = initial_state
-            
+
             # Ensure we have a valid dictionary
             if not isinstance(final_state, dict):
                 logger.error("final_state_not_dict_after_conversion", state_type=type(final_state))
@@ -240,7 +293,9 @@ class KnowledgeAgent:
             return {
                 "response": final_state.get("response", ""),
                 "citations": final_state.get("citations", []),
-                "retrieved_docs": final_state.get("retrieved_docs", []),  # Include retrieved docs for source building
+                "retrieved_docs": final_state.get(
+                    "retrieved_docs", []
+                ),  # Include retrieved docs for source building
                 "context_used": [
                     doc.get("chunk_id", "") if isinstance(doc, dict) else ""
                     for doc in final_state.get("retrieved_docs", [])
@@ -251,9 +306,15 @@ class KnowledgeAgent:
             }
         except Exception as e:
             import traceback
+
             error_trace = traceback.format_exc()
-            logger.error("agent_query_failed", error=str(e), error_type=type(e).__name__, traceback=error_trace)
-            
+            logger.error(
+                "agent_query_failed",
+                error=str(e),
+                error_type=type(e).__name__,
+                traceback=error_trace,
+            )
+
             # More specific error message
             error_msg = str(e)
             if "api key" in error_msg.lower() or "authentication" in error_msg.lower():
@@ -263,11 +324,13 @@ class KnowledgeAgent:
                 )
             elif "rate limit" in error_msg.lower():
                 error_msg = "Rate limit exceeded. Please try again in a few moments."
-            elif "model" in error_msg.lower() and ("not found" in error_msg.lower() or "decommissioned" in error_msg.lower()):
+            elif "model" in error_msg.lower() and (
+                "not found" in error_msg.lower() or "decommissioned" in error_msg.lower()
+            ):
                 error_msg = "Model not found or decommissioned. Check the model configuration in the .env file"
             else:
                 error_msg = f"Error processing query: {error_msg}"
-            
+
             # Return error response in valid format
             return {
                 "response": error_msg,

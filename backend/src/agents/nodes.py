@@ -1,25 +1,32 @@
 """Nodes for LangGraph agent."""
 
-from typing import List
+from typing import Literal
+
 import structlog
 from langchain_openai import ChatOpenAI
+
 try:
     from langchain_core.prompts import ChatPromptTemplate
 except ImportError:
-    # Fallback para versões antigas do LangChain
+    # Fallback for older LangChain versions
     from langchain.prompts import ChatPromptTemplate
+
 from src.agents.state import AgentState
 from src.rag.retriever import RAGRetriever
-from src.config import settings
 
 logger = structlog.get_logger()
 
+# Constants
+REFINE_THRESHOLD_MULTIPLIER = 0.7  # Use 70% of original threshold for refinement
+
 
 def retrieve_node(
-    state: AgentState, 
-    retriever: RAGRetriever, 
+    state: AgentState,
+    retriever: RAGRetriever,
     top_k: int = 5,
     score_threshold: float = 0.7,  # Default from AgentConfig, will be overridden by config
+    search_type: Literal["vector", "bm25", "hybrid"] | None = None,
+    alpha: float | None = None,
 ) -> AgentState:
     """
     Retrieve relevant documents using RAG.
@@ -29,15 +36,29 @@ def retrieve_node(
         retriever: RAG retriever instance
         top_k: Number of documents to retrieve
         score_threshold: Minimum similarity score threshold
+        search_type: Type of search ("vector", "bm25", "hybrid")
+        alpha: Weight for hybrid search
 
     Returns:
         Updated state with retrieved documents
     """
     query = state.get("query", "")
-    logger.info("retrieving_documents", query=query, top_k=top_k, score_threshold=score_threshold)
+    logger.info(
+        "retrieving_documents",
+        query=query,
+        top_k=top_k,
+        score_threshold=score_threshold,
+        search_type=search_type,
+    )
 
     # Use provided score_threshold (from config or request)
-    result = retriever.retrieve(query, top_k=top_k, score_threshold=score_threshold)
+    result = retriever.retrieve(
+        query,
+        top_k=top_k,
+        score_threshold=score_threshold,
+        search_type=search_type,
+        alpha=alpha,
+    )
 
     # Update state
     retrieved_docs = [
@@ -47,7 +68,7 @@ def retrieve_node(
             "score": score,
             "chunk_id": chunk.chunk_id,
         }
-        for chunk, score in zip(result.chunks, result.scores)
+        for chunk, score in zip(result.chunks, result.scores, strict=False)
     ]
 
     state["retrieved_docs"] = retrieved_docs
@@ -80,13 +101,15 @@ def generate_node(
 
     # Build context from retrieved documents
     # Improved context formatting for better LLM understanding
-    context_parts: List[str] = []
-    citations: List[str] = []
+    context_parts: list[str] = []
+    citations: list[str] = []
 
     if not retrieved_docs:
         logger.warning("no_documents_retrieved", query=query)
         state["context"] = "No relevant documents were found in the knowledge base."
-        state["response"] = "I couldn't find relevant information in the knowledge base to answer your question. Please try rephrasing your question or upload more documents."
+        state["response"] = (
+            "I couldn't find relevant information in the knowledge base to answer your question. Please try rephrasing your question or upload more documents."
+        )
         state["citations"] = []
         return state
 
@@ -94,14 +117,14 @@ def generate_node(
         content = doc.get("content", "").strip()
         chunk_id = doc.get("chunk_id", f"doc_{idx}")
         score = doc.get("score", 0.0)
-        
+
         # Format: Clear source identification with content
         # Put chunk_id at the end for easier citation
         context_parts.append(f"DOCUMENT EXCERPT [{chunk_id}] (Relevance: {score:.1%}):\n{content}")
         citations.append(chunk_id)
 
     # Join with clear separators
-    context = "\n\n" + "="*80 + "\n\n".join(context_parts) + "\n\n" + "="*80
+    context = "\n\n" + "=" * 80 + "\n\n".join(context_parts) + "\n\n" + "=" * 80
     state["context"] = context
     state["citations"] = citations
 
@@ -115,19 +138,30 @@ def generate_node(
                 "Your answers must be SPECIFIC, DETAILED, and DIRECTLY based on the content provided.\n\n"
                 "CRITICAL RULES:\n"
                 "- Answer ONLY using information from the context below\n"
-                "- Be SPECIFIC and DETAILED - quote exact information when possible\n"
-                "- Do NOT be generic or vague - use the actual content from the documents\n"
-                "- Cite sources using [chunk_id] format for EVERY piece of information\n"
-                "- If the context contains specific names, dates, numbers, or facts, USE THEM\n"
-                "- Structure your answer to directly address the question with concrete details\n"
-                "- If information is missing, say exactly what is missing, don't generalize\n\n"
+                "- NEVER invent, generalize, or create categories that are not explicitly in the context\n"
+                "- If asked about multiple documents, list each document separately with its specific content\n"
+                "- Each different piece of information MUST use a DIFFERENT chunk_id citation\n"
+                "- Do NOT reuse the same chunk_id for different information\n"
+                "- Quote EXACT text from the context when possible - do not paraphrase into generic categories\n"
+                "- If the context mentions specific document types or names, use those EXACTLY\n"
+                "- If information is missing, say exactly what is missing, don't generalize\n"
+                "- Do NOT create lists of document types unless they are explicitly listed in the context\n\n"
+                "Citation rules:\n"
+                "- Use [chunk_id: {chunk_id}] format for citations\n"
+                "- Each unique fact or piece of information must have its own citation\n"
+                "- If multiple chunks contain similar information, cite each one separately\n"
+                "- Never use the same chunk_id citation multiple times unless referring to the exact same information\n\n"
                 "Answer format:\n"
                 "- Start with a direct answer to the question\n"
-                "- Provide specific details, facts, and examples from the context\n"
-                "- Use citations [chunk_id] for each specific piece of information\n"
-                "- Be concrete, not abstract",
+                "- Quote or summarize the ACTUAL content from the context\n"
+                "- If listing documents, describe what each document ACTUALLY contains based on the context\n"
+                "- Use specific citations [chunk_id: ...] for each piece of information\n"
+                "- Be concrete and factual, not abstract or generic",
             ),
-            ("human", "DOCUMENT CONTENT:\n{context}\n\nUSER QUESTION: {query}\n\nProvide a SPECIFIC and DETAILED answer using ONLY the information from the document content above. Be concrete and cite your sources:"),
+            (
+                "human",
+                "DOCUMENT CONTENT:\n{context}\n\nUSER QUESTION: {query}\n\nProvide a SPECIFIC and DETAILED answer using ONLY the information from the document content above. Quote actual content and cite each piece of information with its specific chunk_id:",
+            ),
         ]
     )
 
@@ -147,14 +181,16 @@ def generate_node(
                 "Error: API key is not configured correctly. "
                 "Check the settings in the backend .env file."
             )
-        elif "model" in error_msg.lower() and ("decommissioned" in error_msg.lower() or "not found" in error_msg.lower()):
+        elif "model" in error_msg.lower() and (
+            "decommissioned" in error_msg.lower() or "not found" in error_msg.lower()
+        ):
             response_text = (
                 "Error: The configured model is not available. "
                 "Check LLM_MODEL in the .env file. Available Groq models: llama-3.1-8b-instant, llama-3.1-70b-versatile, mixtral-8x7b-32768"
             )
         else:
             response_text = f"Error generating response: {error_msg}"
-        
+
         state["response"] = response_text
         state["validation_score"] = 0.0
 
@@ -209,10 +245,14 @@ def validate_node(
 
     try:
         chain = prompt | llm
-        validation_response = chain.invoke({"query": query, "context": context, "response": response})
+        validation_response = chain.invoke(
+            {"query": query, "context": context, "response": response}
+        )
 
         validation_text = (
-            validation_response.content if hasattr(validation_response, "content") else str(validation_response)
+            validation_response.content
+            if hasattr(validation_response, "content")
+            else str(validation_response)
         )
     except Exception as e:
         logger.error("llm_validation_failed", error=str(e))
@@ -241,6 +281,8 @@ def refine_node(
     llm: ChatOpenAI,
     top_k: int = 5,
     score_threshold: float = 0.7,  # Default from AgentConfig, will be overridden by config
+    search_type: Literal["vector", "bm25", "hybrid"] | None = None,
+    alpha: float | None = None,
 ) -> AgentState:
     """
     Refine response by retrieving additional documents.
@@ -251,6 +293,8 @@ def refine_node(
         llm: LLM instance
         top_k: Number of additional documents to retrieve
         score_threshold: Minimum similarity score threshold
+        search_type: Type of search ("vector", "bm25", "hybrid")
+        alpha: Weight for hybrid search
 
     Returns:
         Updated state with refined response
@@ -258,12 +302,20 @@ def refine_node(
     query = state.get("query", "")
     iteration = state.get("iteration_count", 0) + 1
 
-    logger.info("refining_response", query=query, iteration=iteration, score_threshold=score_threshold)
+    logger.info(
+        "refining_response", query=query, iteration=iteration, score_threshold=score_threshold
+    )
 
     # Retrieve more documents (expand search) with lower threshold for refinement
     # Use 70% of original threshold to expand search, but respect user's minimum
-    refined_threshold = score_threshold * 0.7
-    result = retriever.retrieve(query, top_k=top_k * 2, score_threshold=refined_threshold)
+    refined_threshold = score_threshold * REFINE_THRESHOLD_MULTIPLIER
+    result = retriever.retrieve(
+        query,
+        top_k=top_k * 2,
+        score_threshold=refined_threshold,
+        search_type=search_type,
+        alpha=alpha,
+    )
 
     # Merge with existing retrieved docs
     existing_ids = {doc.get("chunk_id") for doc in state.get("retrieved_docs", [])}
@@ -274,7 +326,7 @@ def refine_node(
             "score": score,
             "chunk_id": chunk.chunk_id,
         }
-        for chunk, score in zip(result.chunks, result.scores)
+        for chunk, score in zip(result.chunks, result.scores, strict=False)
         if chunk.chunk_id not in existing_ids
     ]
 

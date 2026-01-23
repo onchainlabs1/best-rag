@@ -32,13 +32,9 @@ Update in `backend/src/main.py` line 43.
 
 #### 2. Debug Endpoint
 
-**Current:** `/api/v1/health/debug` exposes internal system information.
+**Current:** `/api/v1/health/debug` is protected and only available when `DEBUG=true` is set.
 
-**Production:** Disable or protect with authentication:
-```python
-if not settings.debug:
-    # Remove debug endpoint in production
-```
+**Production:** The endpoint automatically returns 403 Forbidden when `DEBUG=false`, ensuring it's not accessible in production.
 
 #### 3. Rate Limiting
 

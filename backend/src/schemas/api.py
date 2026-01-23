@@ -1,23 +1,34 @@
 """Type Specs for FastAPI endpoints."""
 
-from typing import List
-from pydantic import BaseModel, Field
 from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, Field, field_validator
 
 
 class DocumentUpload(BaseModel):
     """Spec: Request for document upload."""
 
-    filename: str = Field(..., description="Name of the file")
-    content: str = Field(..., description="Document content (base64 encoded for binary files)")
+    filename: str = Field(..., min_length=1, max_length=255, description="Name of the file")
+    content: str = Field(
+        ..., max_length=67_000_000, description="Document content (base64 encoded, max ~50MB)"
+    )
     content_type: str = Field(default="text/plain", description="MIME type of the document")
     metadata: dict = Field(default_factory=dict, description="Additional metadata")
+
+    @field_validator("content")
+    @classmethod
+    def validate_content_size(cls, v: str) -> str:
+        """Validate file size. Base64 encoding increases size by ~33%, so 50MB file = ~67MB base64."""
+        if len(v) > 67_000_000:
+            raise ValueError("File too large. Maximum size is 50MB.")
+        return v
 
 
 class BatchDocumentUpload(BaseModel):
     """Spec: Request for batch document upload."""
 
-    documents: List[DocumentUpload] = Field(..., description="List of documents to upload")
+    documents: list[DocumentUpload] = Field(..., description="List of documents to upload")
 
 
 class DocumentInfo(BaseModel):
@@ -34,15 +45,15 @@ class DocumentInfo(BaseModel):
 class DocumentList(BaseModel):
     """Spec: Response with list of documents."""
 
-    documents: List[DocumentInfo] = Field(..., description="List of documents")
+    documents: list[DocumentInfo] = Field(..., description="List of documents")
     total: int = Field(..., description="Total number of documents")
 
 
 class BatchDocumentUploadResponse(BaseModel):
     """Spec: Response for batch document upload."""
 
-    documents: List[DocumentInfo] = Field(..., description="Successfully uploaded documents")
-    errors: List[dict] = Field(default_factory=list, description="Upload errors")
+    documents: list[DocumentInfo] = Field(..., description="Successfully uploaded documents")
+    errors: list[dict] = Field(default_factory=list, description="Upload errors")
     total: int = Field(..., description="Total documents processed")
     success_count: int = Field(..., description="Number of successful uploads")
     error_count: int = Field(..., description="Number of failed uploads")
@@ -51,17 +62,23 @@ class BatchDocumentUploadResponse(BaseModel):
 class QueryRequest(BaseModel):
     """Spec: Request for query processing."""
 
-    query: str = Field(..., min_length=1, description="User query")
+    query: str = Field(..., min_length=1, max_length=5000, description="User query")
     top_k: int = Field(default=5, ge=1, le=20, description="Number of results")
     score_threshold: float = Field(default=0.3, ge=0.0, le=1.0, description="Minimum score")
     stream: bool = Field(default=False, description="Enable streaming response")
+    search_type: Literal["vector", "bm25", "hybrid"] | None = Field(
+        default=None, description="Search type (default: from config)"
+    )
+    alpha: float | None = Field(
+        default=None, ge=0.0, le=1.0, description="Hybrid search weight (0.0=BM25 only, 1.0=vector only)"
+    )
 
 
 class QueryResponse(BaseModel):
     """Spec: Response from query processing."""
 
     answer: str = Field(..., description="Generated answer")
-    sources: List["SourceInfo"] = Field(default_factory=list, description="Source documents")
+    sources: list["SourceInfo"] = Field(default_factory=list, description="Source documents")
     score: float = Field(..., description="Relevance score")
     metadata: dict = Field(default_factory=dict, description="Additional metadata")
 

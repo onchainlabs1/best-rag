@@ -1,8 +1,8 @@
 """Test Specs for RAG schemas."""
 
 import pytest
-from src.schemas.rag import DocumentChunk, RetrievalResult, EmbeddingRequest, EmbeddingResponse
-from tests.fixtures.rag import sample_chunk, sample_chunks, sample_embedding
+
+from src.schemas.rag import DocumentChunk, EmbeddingRequest, EmbeddingResponse, RetrievalResult
 
 
 def test_document_chunk_creation(sample_chunk: DocumentChunk) -> None:

@@ -15,22 +15,25 @@ A Knowledge Base system that:
 
 ### 1. Data Layer
 - **ChromaDB**: Vector database for embeddings and document storage (persistent, local file-based)
-- **In-Memory**: Document metadata stored in memory (DocumentService)
-- **Note**: PostgreSQL integration for metadata persistence is planned but not yet implemented
+- **SQLite**: Document metadata stored persistently in SQLite database (DocumentStorage) - default for development
+- **PostgreSQL**: Alternative storage backend for production (PostgreSQLDocumentStorage) - configurable via `STORAGE_BACKEND`
 
 ### 2. RAG Layer (`backend/src/rag/`)
 - **Chunking**: Intelligent document splitting with overlap (RecursiveCharacterTextSplitter)
 - **Embeddings**: Generation via OpenAI or local models (configurable via `EMBEDDING_PROVIDER`)
 - **Retriever**: Vector similarity search using ChromaDB (semantic search)
 - **Vector Store**: ChromaDB integration for persistent storage
-- **Note**: Hybrid search (BM25 + vector) and re-ranking are planned but not yet implemented
+- **Hybrid Search**: BM25 + Vector search combination (configurable via `SEARCH_TYPE`)
+- **Re-ranking**: Cross-Encoder re-ranking for improved result quality (configurable via `RERANK_ENABLED`)
+- **Caching**: TTL-based caching for embeddings and queries (configurable via `CACHE_ENABLED`)
+- **Query Expansion**: LLM-based query expansion for improved recall (configurable via `QUERY_EXPANSION_ENABLED`)
 
 ### 3. Agent Layer (`backend/src/agents/`)
 - **LangGraph**: State graph with typed state management
 - **Nodes**: retrieve → generate → validate → refine → finalize
 - **State**: Typed with TypedDict (query, context, response, validation_score)
 - **LLM Support**: Groq (default), OpenAI, Anthropic (configurable via `LLM_PROVIDER`)
-- **Note**: Checkpointing not yet implemented (state is ephemeral per query)
+- **Checkpointing**: Optional state persistence using SQLite (configurable via `CHECKPOINTING_ENABLED`)
 
 ### 4. Service Layer (`backend/src/services/`)
 - **DocumentService**: Document upload, processing, indexing
@@ -58,7 +61,7 @@ User Query → Agent → Retrieve (RAG) → Generate → Validate → Response
 1. **Spec-Driven**: All code follows Type Specs → Test Specs → Implementation
 2. **Type Safety**: Pydantic schemas as contracts, mypy strict mode
 3. **Modular**: Each layer independent with clear interfaces
-4. **Observable**: Structured logging, OpenTelemetry tracing
+4. **Observable**: Structured logging (OpenTelemetry tracing planned)
 5. **Agent-Friendly**: Small modules, clear contracts, self-documenting
 
 ## Dependencies Between Modules

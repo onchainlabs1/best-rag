@@ -1,6 +1,7 @@
 """Type Specs for LangGraph agents."""
 
-from typing import List, Literal
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -8,20 +9,20 @@ class AgentState(BaseModel):
     """Spec: State managed by LangGraph agent."""
 
     query: str = Field(..., description="User query")
-    retrieved_docs: List[dict] = Field(default_factory=list, description="Retrieved documents")
+    retrieved_docs: list[dict] = Field(default_factory=list, description="Retrieved documents")
     context: str = Field(default="", description="Context assembled from retrieved docs")
     response: str = Field(default="", description="Generated response")
     validation_score: float = Field(default=0.0, description="Quality score of response")
     iteration_count: int = Field(default=0, description="Number of refinement iterations")
-    citations: List[str] = Field(default_factory=list, description="Citations for sources")
+    citations: list[str] = Field(default_factory=list, description="Citations for sources")
 
 
 class AgentResponse(BaseModel):
     """Spec: Final response from agent."""
 
     response: str = Field(..., description="Generated response text")
-    citations: List[str] = Field(default_factory=list, description="Source citations")
-    context_used: List[str] = Field(default_factory=list, description="Context chunks used")
+    citations: list[str] = Field(default_factory=list, description="Source citations")
+    context_used: list[str] = Field(default_factory=list, description="Context chunks used")
     validation_score: float = Field(..., description="Quality score")
     iteration_count: int = Field(..., description="Number of iterations")
     metadata: dict = Field(default_factory=dict, description="Additional metadata")
@@ -35,6 +36,12 @@ class AgentConfig(BaseModel):
     top_k: int = Field(default=5, description="Number of documents to retrieve")
     score_threshold: float = Field(default=0.7, description="Minimum retrieval score")
     stream: bool = Field(default=False, description="Enable streaming responses")
+    search_type: Literal["vector", "bm25", "hybrid"] | None = Field(
+        default=None, description="Search type (default: from config)"
+    )
+    alpha: float | None = Field(
+        default=None, ge=0.0, le=1.0, description="Hybrid search weight"
+    )
 
 
 class NodeOutput(BaseModel):

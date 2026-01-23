@@ -1,8 +1,8 @@
 """Shared service instances to ensure data consistency."""
 
-from src.services.document_service import DocumentService
-from src.services.agent_service import AgentService
 from src.rag.retriever import RAGRetriever
+from src.services.agent_service import AgentService
+from src.services.document_service import DocumentService
 
 # Create a single shared instance of the retriever
 # This ensures that DocumentService and AgentService access the same data

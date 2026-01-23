@@ -1,13 +1,13 @@
 """Test Specs for RAG retriever."""
 
-import pytest
-import tempfile
 import shutil
-from pathlib import Path
-from src.rag.retriever import RAGRetriever
+import tempfile
+
+import pytest
+
 from src.rag.embeddings import EmbeddingService
+from src.rag.retriever import RAGRetriever
 from src.schemas.rag import DocumentChunk, RetrievalResult
-from tests.fixtures.rag import sample_chunks, sample_texts
 
 
 @pytest.fixture

@@ -1,6 +1,5 @@
 """Type Specs for RAG (Retrieval-Augmented Generation) system."""
 
-from typing import List
 from pydantic import BaseModel, Field
 
 
@@ -9,7 +8,7 @@ class DocumentChunk(BaseModel):
 
     content: str = Field(..., description="The text content of the chunk")
     metadata: dict = Field(default_factory=dict, description="Metadata associated with the chunk")
-    embedding: List[float] | None = Field(None, description="Vector embedding for semantic search")
+    embedding: list[float] | None = Field(None, description="Vector embedding for semantic search")
     chunk_id: str | None = Field(None, description="Unique identifier for the chunk")
     source: str | None = Field(None, description="Source document identifier")
     position: int | None = Field(None, description="Position of chunk in source document")
@@ -18,8 +17,10 @@ class DocumentChunk(BaseModel):
 class RetrievalResult(BaseModel):
     """Spec: Result of a document retrieval operation."""
 
-    chunks: List[DocumentChunk] = Field(default_factory=list, description="Retrieved document chunks")
-    scores: List[float] = Field(default_factory=list, description="Relevance scores for each chunk")
+    chunks: list[DocumentChunk] = Field(
+        default_factory=list, description="Retrieved document chunks"
+    )
+    scores: list[float] = Field(default_factory=list, description="Relevance scores for each chunk")
     query: str = Field(..., description="The query that was used for retrieval")
     total_results: int = Field(default=0, description="Total number of results found")
 
@@ -27,13 +28,13 @@ class RetrievalResult(BaseModel):
 class EmbeddingRequest(BaseModel):
     """Spec: Request for generating embeddings."""
 
-    texts: List[str] = Field(..., min_items=1, description="Texts to embed")
+    texts: list[str] = Field(..., min_items=1, description="Texts to embed")
     model: str | None = Field(None, description="Embedding model to use")
 
 
 class EmbeddingResponse(BaseModel):
     """Spec: Response with generated embeddings."""
 
-    embeddings: List[List[float]] = Field(..., description="Generated embeddings")
+    embeddings: list[list[float]] = Field(..., description="Generated embeddings")
     model: str = Field(..., description="Model used for embeddings")
     dimensions: int = Field(..., description="Dimension of embeddings")

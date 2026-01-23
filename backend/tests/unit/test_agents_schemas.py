@@ -1,7 +1,6 @@
 """Test Specs for agent schemas."""
 
-import pytest
-from src.schemas.agents import AgentState, AgentResponse, AgentConfig
+from src.schemas.agents import AgentConfig, AgentResponse, AgentState
 
 
 def test_agent_state_initialization() -> None:

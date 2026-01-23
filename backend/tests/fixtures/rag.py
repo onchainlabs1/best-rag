@@ -1,7 +1,7 @@
 """Fixtures for RAG system tests."""
 
 import pytest
-from typing import List
+
 from src.schemas.rag import DocumentChunk, RetrievalResult
 
 
@@ -18,7 +18,7 @@ def sample_chunk() -> DocumentChunk:
 
 
 @pytest.fixture
-def sample_chunks() -> List[DocumentChunk]:
+def sample_chunks() -> list[DocumentChunk]:
     """Fixture: List of sample document chunks."""
     return [
         DocumentChunk(
@@ -46,7 +46,7 @@ def sample_chunks() -> List[DocumentChunk]:
 
 
 @pytest.fixture
-def sample_retrieval_result(sample_chunks: List[DocumentChunk]) -> RetrievalResult:
+def sample_retrieval_result(sample_chunks: list[DocumentChunk]) -> RetrievalResult:
     """Fixture: Sample retrieval result."""
     return RetrievalResult(
         chunks=sample_chunks,
@@ -57,13 +57,13 @@ def sample_retrieval_result(sample_chunks: List[DocumentChunk]) -> RetrievalResu
 
 
 @pytest.fixture
-def sample_embedding() -> List[float]:
+def sample_embedding() -> list[float]:
     """Fixture: Sample embedding vector."""
     return [0.1] * 384  # 384-dimensional embedding (common for sentence transformers)
 
 
 @pytest.fixture
-def sample_texts() -> List[str]:
+def sample_texts() -> list[str]:
     """Fixture: Sample texts for embedding."""
     return [
         "This is the first text to embed.",

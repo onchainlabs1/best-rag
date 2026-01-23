@@ -1,11 +1,13 @@
 """Agent service for query processing."""
 
-from typing import Iterator
+from collections.abc import Iterator
+
+import structlog
+
 from src.agents.knowledge_agent import KnowledgeAgent
 from src.rag.retriever import RAGRetriever
 from src.schemas.agents import AgentConfig
 from src.schemas.api import QueryRequest, QueryResponse, SourceInfo
-import structlog
 
 logger = structlog.get_logger()
 
@@ -51,6 +53,8 @@ class AgentService:
             top_k=request.top_k,
             score_threshold=request.score_threshold,
             stream=request.stream,
+            search_type=request.search_type,
+            alpha=request.alpha,
         )
         self.agent.config = config
 
@@ -71,19 +75,19 @@ class AgentService:
                         "error": "no_documents",
                         "message": "No documents indexed",
                         "collection_count": 0,
-                    }
+                    },
                 )
         except Exception as e:
             logger.warning("failed_to_count_collection", error=str(e))
 
         # Process query using agent (agent will handle retrieval internally)
         result = self.agent.query(query=request.query, stream=False)
-        
+
         # Ensure result is a dictionary
         if not isinstance(result, dict):
             logger.error("agent_query_returned_non_dict", result_type=type(result))
             # Se for um generator ou outro tipo, criar um dict vazio
-            if hasattr(result, '__dict__'):
+            if hasattr(result, "__dict__"):
                 result = result.__dict__
             else:
                 result = {
@@ -96,11 +100,11 @@ class AgentService:
 
         # Build sources from agent's retrieved documents and citations
         sources: list[SourceInfo] = []
-        
+
         # Get retrieved documents from agent result
         retrieved_docs_list = result.get("retrieved_docs", []) if isinstance(result, dict) else []
         citation_ids = set(result.get("citations", []) if isinstance(result, dict) else [])
-        
+
         # Build sources from retrieved documents
         for doc in retrieved_docs_list:
             if isinstance(doc, dict):
@@ -109,15 +113,21 @@ class AgentService:
                 if chunk_id in citation_ids or len(citation_ids) == 0:
                     source = SourceInfo(
                         chunk_id=chunk_id or "",
-                        content=(doc.get("content", "")[:200] + "..." 
-                                if len(doc.get("content", "")) > 200 
-                                else doc.get("content", "")),
-                        source=doc.get("metadata", {}).get("source", "") if isinstance(doc.get("metadata"), dict) else "",
+                        content=(
+                            doc.get("content", "")[:200] + "..."
+                            if len(doc.get("content", "")) > 200
+                            else doc.get("content", "")
+                        ),
+                        source=doc.get("metadata", {}).get("source", "")
+                        if isinstance(doc.get("metadata"), dict)
+                        else "",
                         score=doc.get("score", 0.0),
-                        metadata=doc.get("metadata", {}) if isinstance(doc.get("metadata"), dict) else {},
+                        metadata=doc.get("metadata", {})
+                        if isinstance(doc.get("metadata"), dict)
+                        else {},
                     )
                     sources.append(source)
-        
+
         # If no sources but we have citations, try to retrieve them
         if not sources and citation_ids:
             logger.info("retrieving_cited_documents", citation_count=len(citation_ids))
@@ -130,10 +140,16 @@ class AgentService:
                         if results and results.get("documents"):
                             source = SourceInfo(
                                 chunk_id=citation_id,
-                                content=results["documents"][0][:200] + "..." if len(results["documents"][0]) > 200 else results["documents"][0],
-                                source=results.get("metadatas", [{}])[0].get("source", "") if results.get("metadatas") else "",
+                                content=results["documents"][0][:200] + "..."
+                                if len(results["documents"][0]) > 200
+                                else results["documents"][0],
+                                source=results.get("metadatas", [{}])[0].get("source", "")
+                                if results.get("metadatas")
+                                else "",
                                 score=0.0,  # Score not available from direct get
-                                metadata=results.get("metadatas", [{}])[0] if results.get("metadatas") else {},
+                                metadata=results.get("metadatas", [{}])[0]
+                                if results.get("metadatas")
+                                else {},
                             )
                             sources.append(source)
                     except Exception:
@@ -175,9 +191,10 @@ class AgentService:
             top_k=request.top_k,
             score_threshold=request.score_threshold,
             stream=True,
+            search_type=request.search_type,
+            alpha=request.alpha,
         )
         self.agent.config = config
 
         # Stream query processing
-        for state_update in self.agent.query(query=request.query, stream=True):
-            yield state_update
+        yield from self.agent.query(query=request.query, stream=True)

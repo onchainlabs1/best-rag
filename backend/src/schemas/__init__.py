@@ -1,16 +1,16 @@
 """Pydantic schemas (Type Specs) for the application."""
 
-from src.schemas.rag import DocumentChunk, RetrievalResult, EmbeddingRequest, EmbeddingResponse
-from src.schemas.agents import AgentState, AgentResponse, AgentConfig
+from src.schemas.agents import AgentConfig, AgentResponse, AgentState
 from src.schemas.api import (
-    DocumentUpload,
-    DocumentList,
     DocumentInfo,
+    DocumentList,
+    DocumentUpload,
+    HealthResponse,
     QueryRequest,
     QueryResponse,
     SourceInfo,
-    HealthResponse,
 )
+from src.schemas.rag import DocumentChunk, EmbeddingRequest, EmbeddingResponse, RetrievalResult
 
 __all__ = [
     "DocumentChunk",

@@ -1,14 +1,14 @@
 """Test Specs for API schemas."""
 
 from datetime import datetime
+
 from src.schemas.api import (
-    DocumentUpload,
-    DocumentList,
     DocumentInfo,
+    DocumentUpload,
+    HealthResponse,
     QueryRequest,
     QueryResponse,
     SourceInfo,
-    HealthResponse,
 )
 
 

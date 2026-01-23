@@ -1,24 +1,29 @@
 """Document endpoints."""
 
-from fastapi import APIRouter, HTTPException, status
-from typing import List
+import asyncio
+
+import structlog
+from fastapi import APIRouter, HTTPException, Request, status
+from slowapi import Limiter
+
+from src.config import settings
 from src.schemas.api import (
-    DocumentUpload, 
-    DocumentList, 
-    DocumentInfo,
     BatchDocumentUpload,
     BatchDocumentUploadResponse,
+    DocumentInfo,
+    DocumentList,
+    DocumentUpload,
 )
-from src.services.document_service import DocumentService
+from src.shared_services import document_service
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
-# Service instance - use shared instance
-from src.shared_services import document_service
+# Rate limiter - will be set from app state
+limiter: Limiter | None = None
 
 
 @router.post("", response_model=DocumentInfo, status_code=status.HTTP_201_CREATED)
-async def upload_document(upload: DocumentUpload) -> DocumentInfo:
+async def upload_document(request: Request, upload: DocumentUpload) -> DocumentInfo:
     """
     Upload a document to the knowledge base.
 
@@ -28,24 +33,21 @@ async def upload_document(upload: DocumentUpload) -> DocumentInfo:
     Returns:
         Document information
     """
-    import asyncio
-    import structlog
-    
+    # Apply rate limiting if enabled
+    if settings.rate_limit_enabled and limiter:
+        limiter.limit(settings.rate_limit_uploads)(lambda: None)()
+
     logger = structlog.get_logger()
-    
+
     try:
         # Process in background to avoid blocking
         # For now, process synchronously but log progress
         logger.info("document_upload_started", filename=upload.filename, size=len(upload.content))
-        
+
         # Run in thread pool to avoid blocking the event loop
         loop = asyncio.get_event_loop()
-        doc = await loop.run_in_executor(
-            None,
-            document_service.upload_document,
-            upload
-        )
-        
+        doc = await loop.run_in_executor(None, document_service.upload_document, upload)
+
         logger.info("document_upload_completed", doc_id=doc.id, chunks=doc.chunk_count)
         return doc
     except Exception as e:
@@ -88,8 +90,10 @@ async def get_document(doc_id: str) -> DocumentInfo:
     return doc
 
 
-@router.post("/batch", response_model=BatchDocumentUploadResponse, status_code=status.HTTP_201_CREATED)
-async def upload_documents_batch(batch: BatchDocumentUpload) -> BatchDocumentUploadResponse:
+@router.post(
+    "/batch", response_model=BatchDocumentUploadResponse, status_code=status.HTTP_201_CREATED
+)
+async def upload_documents_batch(request: Request, batch: BatchDocumentUpload) -> BatchDocumentUploadResponse:
     """
     Upload multiple documents in batch.
 
@@ -99,27 +103,24 @@ async def upload_documents_batch(batch: BatchDocumentUpload) -> BatchDocumentUpl
     Returns:
         Batch upload response with results
     """
-    import asyncio
-    import structlog
-    
+    # Apply rate limiting if enabled
+    if settings.rate_limit_enabled and limiter:
+        limiter.limit(settings.rate_limit_uploads)(lambda: None)()
+
     logger = structlog.get_logger()
-    
-    uploaded_docs: List[DocumentInfo] = []
-    errors: List[dict] = []
-    
+
+    uploaded_docs: list[DocumentInfo] = []
+    errors: list[dict] = []
+
     logger.info("batch_upload_started", count=len(batch.documents))
-    
+
     # Process documents sequentially to avoid overwhelming the system
     loop = asyncio.get_event_loop()
-    
+
     for idx, upload in enumerate(batch.documents):
         try:
             logger.info("batch_upload_item", index=idx, filename=upload.filename)
-            doc = await loop.run_in_executor(
-                None,
-                document_service.upload_document,
-                upload
-            )
+            doc = await loop.run_in_executor(None, document_service.upload_document, upload)
             uploaded_docs.append(doc)
             logger.info("batch_upload_item_success", index=idx, doc_id=doc.id)
         except Exception as e:
@@ -129,15 +130,17 @@ async def upload_documents_batch(batch: BatchDocumentUpload) -> BatchDocumentUpl
                 "index": idx,
             }
             errors.append(error_info)
-            logger.error("batch_upload_item_failed", index=idx, filename=upload.filename, error=str(e))
-    
+            logger.error(
+                "batch_upload_item_failed", index=idx, filename=upload.filename, error=str(e)
+            )
+
     logger.info(
         "batch_upload_completed",
         total=len(batch.documents),
         success=len(uploaded_docs),
-        errors=len(errors)
+        errors=len(errors),
     )
-    
+
     return BatchDocumentUploadResponse(
         documents=uploaded_docs,
         errors=errors,
